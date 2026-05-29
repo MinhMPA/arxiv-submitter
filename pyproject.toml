@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arxiv-submitter"
+version = "0.1.0"
+description = "Schedule and click the final Submit button on an arXiv staged submission, unattended."
+requires-python = ">=3.10"
+dependencies = [
+  "playwright>=1.45",
+  "pycryptodome>=3.20",
+]
+
+[project.scripts]
+arxiv-submit = "arxiv_submitter.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
