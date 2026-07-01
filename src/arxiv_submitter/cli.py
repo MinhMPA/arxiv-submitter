@@ -27,6 +27,19 @@ def _parse_when(s: str, tz_name: str) -> _dt.datetime:
     return dt.replace(tzinfo=ZoneInfo(tz_name))
 
 
+_CHROME_DIR = (Path.home() / "Library" / "Application Support"
+               / "Google" / "Chrome")
+
+
+def _resolve_chrome_profiles(vals: list[str] | None) -> list[Path]:
+    """Turn --chrome-profile values into dirs. A bare name (no '/') is taken
+    relative to the default macOS Chrome dir; anything with a '/' is a path."""
+    out: list[Path] = []
+    for v in vals or []:
+        out.append(Path(v).expanduser() if "/" in v else _CHROME_DIR / v)
+    return out
+
+
 # ---------- subcommands -----------------------------------------------------
 
 def cmd_setup_profile(args: argparse.Namespace) -> int:
@@ -65,6 +78,28 @@ def cmd_click(args: argparse.Namespace) -> int:
     target = _parse_when(args.at, args.tz)
     target_local = target.astimezone()
     fire_local = target_local - _dt.timedelta(seconds=args.lead_time)
+
+    # launchd StartCalendarInterval is MINUTE-granular: it drops the seconds and
+    # fires at the minute boundary (e.g. fire=20:18:58 -> launchd fires 20:18:00).
+    # A one-shot whose minute boundary has already passed never runs. Validate
+    # against that truncated boundary (not the fire second), with a small margin
+    # so we don't lose a race loading the plist right at the boundary.
+    fire_minute = fire_local.replace(second=0, microsecond=0)
+    now = _dt.datetime.now(_dt.timezone.utc)
+    margin = _dt.timedelta(seconds=15)
+    if fire_minute <= now + margin:
+        secs = (target_local - now).total_seconds()
+        print(f"ERROR: launchd fires at the minute boundary {fire_minute.isoformat()}, "
+              f"which is not safely in the future.")
+        print(f"  Target is {secs:.0f}s away; fire = target - {args.lead_time}s lead-time, "
+              f"then rounded DOWN to the minute.")
+        print(f"  A launchd one-shot past its minute never runs. Choose one:")
+        print(f"    - pick --at at least ~{args.lead_time + 90}s in the future "
+              f"(so the fire minute is comfortably ahead), or")
+        print(f"    - lower --lead-time, or")
+        print(f"    - submit immediately (no scheduling):  arxiv-submit run-now {args.id}")
+        return 1
+
     label = f"{args.id}-{target_local.strftime('%Y%m%d%H%M%S')}"
     log_dir = Path.home() / ".arxiv-submitter" / "launchd-logs"
 
@@ -77,6 +112,8 @@ def cmd_click(args: argparse.Namespace) -> int:
         argv += ["--url-template", args.url_template]
     if args.profile_dir:
         argv += ["--profile-dir", args.profile_dir]
+    for cp in args.chrome_profile or []:
+        argv += ["--chrome-profile", cp]
 
     plist_path = scheduler.install_launchd(label, fire_local, argv, log_dir)
     print(f"Scheduled launchd job: {plist_path}")
@@ -114,7 +151,9 @@ def cmd_run_now(args: argparse.Namespace) -> int:
     try:
         profile_dir = (Path(args.profile_dir).expanduser()
                        if args.profile_dir else auth.DEFAULT_PROFILE_DIR)
-        pw, session = auth.authenticate(run_dir, profile_dir, args.email)
+        chrome_profiles = _resolve_chrome_profiles(args.chrome_profile)
+        pw, session = auth.authenticate(run_dir, profile_dir, args.email,
+                                        chrome_profiles or None)
         result = clicker.submit(
             session, args.id, args.rehearse,
             run_dir, args.url_template or clicker.DEFAULT_URL_TEMPLATE,
@@ -185,6 +224,12 @@ def build_parser() -> argparse.ArgumentParser:
         x.add_argument("--url-template", default=None,
                        help=f"Default: {clicker.DEFAULT_URL_TEMPLATE}")
         x.add_argument("--profile-dir", default=None)
+        x.add_argument("--chrome-profile", action="append", default=None,
+                       metavar="NAME_OR_PATH",
+                       help="Chrome profile to pull arxiv.org cookies from for "
+                            "tier-3 auth. Bare name (e.g. 'Profile 7') resolves "
+                            "under the default Chrome dir. Repeatable; tried in "
+                            "order until one is logged in.")
 
     cl = sub.add_parser("click", help="Schedule a future Submit click.")
     add_common(cl)

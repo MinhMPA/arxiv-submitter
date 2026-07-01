@@ -122,24 +122,32 @@ def _tier2_keychain_login(pw: Playwright, email: str | None, run_dir: Path):
 # ---------------------------------------------------------------------------
 # Tier 3: extract arxiv.org cookies from Chrome, inject into headless context.
 # ---------------------------------------------------------------------------
-def _tier3_chrome_cookies(pw: Playwright, run_dir: Path):
-    try:
-        cookies = chrome_cookies.extract_arxiv_cookies()
-    except Exception as e:
-        notify.log(run_dir, f"tier3 skipped: {e}", level="warn")
-        return None
-    if not cookies:
-        notify.log(run_dir, "tier3: no arxiv.org cookies in Chrome profile", level="warn")
-        return None
+def _tier3_chrome_cookies(pw: Playwright, run_dir: Path,
+                          chrome_profiles: list[Path] | None = None):
+    # Try each supplied Chrome profile in order; use the first whose arxiv.org
+    # cookies prove logged-in. Falls back to Chrome's "Default" profile when the
+    # caller passes nothing, preserving the original single-profile behavior.
+    profiles = chrome_profiles or [chrome_cookies.DEFAULT_CHROME_PROFILE]
+    for profile in profiles:
+        tag = f"tier3 [{profile.name}]"
+        try:
+            cookies = chrome_cookies.extract_arxiv_cookies(profile)
+        except Exception as e:
+            notify.log(run_dir, f"{tag} skipped: {e}", level="warn")
+            continue
+        if not cookies:
+            notify.log(run_dir, f"{tag}: no arxiv.org cookies in Chrome profile", level="warn")
+            continue
 
-    notify.log(run_dir, f"tier3: injecting {len(cookies)} Chrome cookies")
-    browser = pw.chromium.launch(headless=True)
-    ctx = browser.new_context()
-    ctx.add_cookies(cookies)
-    if is_authenticated(ctx, run_dir):
-        return AuthedSession(ctx, "chrome-cookies", lambda: (ctx.close(), browser.close()))
-    ctx.close(); browser.close()
-    notify.log(run_dir, "tier3: probe failed", level="warn")
+        notify.log(run_dir, f"{tag}: injecting {len(cookies)} Chrome cookies")
+        browser = pw.chromium.launch(headless=True)
+        ctx = browser.new_context()
+        ctx.add_cookies(cookies)
+        if is_authenticated(ctx, run_dir):
+            return AuthedSession(ctx, f"chrome-cookies[{profile.name}]",
+                                 lambda c=ctx, b=browser: (c.close(), b.close()))
+        ctx.close(); browser.close()
+        notify.log(run_dir, f"{tag}: probe failed", level="warn")
     return None
 
 
@@ -150,13 +158,14 @@ def authenticate(
     run_dir: Path,
     profile_dir: Path = DEFAULT_PROFILE_DIR,
     email: str | None = None,
+    chrome_profiles: list[Path] | None = None,
 ) -> tuple[Playwright, AuthedSession]:
     """Try tiers 1→2→3. Returns (playwright, session) on success; raises on total failure."""
     pw = sync_playwright().start()
     for fn in (
         lambda: _tier1_persisted_profile(pw, profile_dir, run_dir),
         lambda: _tier2_keychain_login(pw, email, run_dir),
-        lambda: _tier3_chrome_cookies(pw, run_dir),
+        lambda: _tier3_chrome_cookies(pw, run_dir, chrome_profiles),
     ):
         session = fn()
         if session is not None:
